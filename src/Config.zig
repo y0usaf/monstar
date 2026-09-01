@@ -66,6 +66,10 @@ font_family: [:0]const u8 = "monospace",
 /// Bare and `pt` values are typographic points; `px` values are logical
 /// pixels. Both apply the output's fractional scale during rasterization.
 font_size: FontSize = .{ .points = 12 },
+/// Absolute cell-height override, like foot's `line-height`. Unset uses
+/// the font's natural metrics. Runtime font-size changes scale it by the
+/// same ratio.
+line_height: ?FontSize = null,
 /// Minimum window padding in logical pixels. One configured value applies to
 /// both sides; two values are left/right for X and top/bottom for Y.
 window_padding_x: WindowPadding = .{},
@@ -202,6 +206,8 @@ pub fn set(self: *Config, arena: std.mem.Allocator, key: []const u8, value: []co
         self.font_family = try arena.dupeZ(u8, value);
     } else if (std.mem.eql(u8, key, "font-size")) {
         self.font_size = try parseFontSize(value);
+    } else if (std.mem.eql(u8, key, "line-height")) {
+        self.line_height = try parseFontSize(value);
     } else if (std.mem.eql(u8, key, "window-padding-x")) {
         self.window_padding_x = try parseWindowPadding(value);
     } else if (std.mem.eql(u8, key, "window-padding-y")) {
@@ -381,6 +387,24 @@ pub fn fontSizePixels(size: FontSize, scale120: u32) u31 {
     };
     const pixels = logical_pixels * output_scale;
     return @max(1, @as(u31, @intFromFloat(@round(pixels))));
+}
+
+/// Resolves the line-height override to physical pixels for a font that
+/// renders at `font_size_px`, scaled by the same ratio that separates the
+/// target font size from its configured size (runtime zoom), like foot.
+/// Returns 0 when line-height is unset.
+pub fn lineHeightPixels(
+    line_height: ?FontSize,
+    font_size: FontSize,
+    font_size_px: u31,
+    scale120: u32,
+) u31 {
+    const override = line_height orelse return 0;
+    const configured_font_px = fontSizePixels(font_size, scale120);
+    const ratio = @as(f64, @floatFromInt(font_size_px)) /
+        @as(f64, @floatFromInt(configured_font_px));
+    const scaled = @as(f64, @floatFromInt(fontSizePixels(override, scale120))) * ratio;
+    return @intFromFloat(@max(1, @min(scaled, @as(f64, @floatFromInt(std.math.maxInt(u31))))));
 }
 
 pub const colorsForScheme = config_theme.colorsForScheme;
@@ -708,6 +732,42 @@ test "font size accepts bare points and explicit point or pixel units" {
     try std.testing.expectEqual(FontSize{ .pixels = 16.5 }, config.font_size);
     try std.testing.expectError(error.InvalidValue, config.set(std.testing.allocator, "font-size", "12em"));
     try std.testing.expectError(error.InvalidValue, config.set(std.testing.allocator, "font-size", "px"));
+}
+
+test "line height accepts bare points and explicit point or pixel units" {
+    var config: Config = .{};
+
+    try std.testing.expectEqual(@as(?FontSize, null), config.line_height);
+    try config.set(std.testing.allocator, "line-height", "1.5");
+    try std.testing.expectEqual(FontSize{ .points = 1.5 }, config.line_height.?);
+    try config.set(std.testing.allocator, "line-height", "20px");
+    try std.testing.expectEqual(FontSize{ .pixels = 20 }, config.line_height.?);
+    try std.testing.expectError(error.InvalidValue, config.set(std.testing.allocator, "line-height", "-1"));
+    try std.testing.expectError(error.InvalidValue, config.set(std.testing.allocator, "line-height", ""));
+}
+
+test "line height scales with runtime font size ratio" {
+    var config: Config = .{};
+    try config.set(std.testing.allocator, "line-height", "20px");
+
+    // At 12pt/120 scale the font is 16px; no zoom, no ratio scaling.
+    try std.testing.expectEqual(
+        @as(u31, 20),
+        lineHeightPixels(config.line_height, config.font_size, 16, 120),
+    );
+
+    // Zooming the font to 24px doubles the resolved line height.
+    try std.testing.expectEqual(
+        @as(u31, 30),
+        lineHeightPixels(config.line_height, config.font_size, 24, 120),
+    );
+
+    // Unset line height stays unset regardless of size.
+    const bare: Config = .{};
+    try std.testing.expectEqual(
+        @as(u31, 0),
+        lineHeightPixels(bare.line_height, bare.font_size, 24, 120),
+    );
 }
 
 test "invalid window padding keeps the previous value" {
